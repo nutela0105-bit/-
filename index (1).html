@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>얼굴 좌표 추적기</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; background: #101820; color: #f2f6f8;
+      font-family: Arial, "Malgun Gothic", sans-serif; text-align: center;
+    }
+    h1 { margin: 0 0 8px; font-size: 26px; }
+    .hint { color: #b8c5cc; margin-bottom: 18px; }
+    .layout { max-width: 1000px; margin: auto; }
+    .screen {
+      position: relative; width: 100%; overflow: hidden; background: #05090c;
+      border: 2px solid #3b5665; border-radius: 12px; aspect-ratio: 16 / 9;
+    }
+    video, canvas {
+      position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+    }
+    video { transform: scaleX(-1); }
+    canvas { pointer-events: none; }
+    .controls { margin: 16px 0; }
+    button {
+      border: 0; border-radius: 8px; padding: 12px 22px; margin: 0 5px;
+      font-size: 16px; font-weight: bold; cursor: pointer;
+    }
+    #startBtn { background: #4de0a5; color: #10251d; }
+    #stopBtn { background: #ff7070; color: #2b1010; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .coords {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px;
+    }
+    .card { background: #1b2a34; border: 1px solid #344d5c; border-radius: 10px; padding: 14px; }
+    .label { color: #a9c0cc; font-size: 14px; }
+    .value { font-size: 25px; font-weight: bold; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    #status { margin: 12px 0 0; min-height: 24px; color: #4de0a5; }
+    .note { color: #a9b6bd; font-size: 13px; line-height: 1.6; margin-top: 12px; }
+    @media (max-width: 600px) {
+      body { padding: 12px; }
+      .coords { gap: 6px; }
+      .card { padding: 10px 5px; }
+      .value { font-size: 19px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <h1>얼굴 좌표 추적기</h1>
+    <p class="hint">얼굴의 좌우(X), 상하(Y), 상대적인 앞뒤(Z)를 화면에 표시합니다.</p>
+
+    <div class="screen">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn">카메라 시작</button>
+      <button id="stopBtn" disabled>정지</button>
+    </div>
+
+    <div class="coords">
+      <div class="card">
+        <div class="label">좌우 X</div>
+        <div class="value" id="xValue">—</div>
+      </div>
+      <div class="card">
+        <div class="label">상하 Y</div>
+        <div class="value" id="yValue">—</div>
+      </div>
+      <div class="card">
+        <div class="label">앞뒤 Z (상대값)</div>
+        <div class="value" id="zValue">—</div>
+      </div>
+    </div>
+
+    <p id="status">카메라 시작 버튼을 눌러 주세요.</p>
+    <p class="note">
+      X는 화면 중앙 기준 좌우 픽셀, Y는 화면 중앙 기준 상하 픽셀입니다.
+      Z는 얼굴 크기로 추정한 상대값이며 실제 거리(m)가 아닙니다.
+      카메라 사용에는 HTTPS 또는 localhost 환경과 인터넷 연결이 필요할 수 있습니다.
+    </p>
+  </main>
+
+  <script type="module">
+    import { FaceDetector, FilesetResolver } from
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const statusEl = document.getElementById("status");
+    const xValue = document.getElementById("xValue");
+    const yValue = document.getElementById("yValue");
+    const zValue = document.getElementById("zValue");
+
+    let detector = null;
+    let stream = null;
+    let running = false;
+    let animationId = null;
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener("resize", resizeCanvas);
+
+    function drawFrame() {
+      if (!running || !detector || video.readyState < 2) {
+        animationId = requestAnimationFrame(drawFrame);
+        return;
+      }
+
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      ctx.clearRect(0, 0, width, height);
+
+      const results = detector.detectForVideo(video, performance.now());
+      const faces = results.detections || [];
+
+      // 화면에 보이는 영상은 좌우 반전이므로 오버레이도 반전 좌표로 표시합니다.
+      ctx.save();
+      ctx.translate(width, 0);
+      ctx.scale(-1, 1);
+
+      ctx.strokeStyle = "rgba(90, 220, 255, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(width / 2, 0); ctx.lineTo(width / 2, height);
+      ctx.moveTo(0, height / 2); ctx.lineTo(width, height / 2);
+      ctx.stroke();
+
+      if (faces.length > 0) {
+        const box = faces[0].boundingBox;
+        const scaleX = width / video.videoWidth;
+        const scaleY = height / video.videoHeight;
+        const x = box.originX * scaleX;
+        const y = box.originY * scaleY;
+        const w = box.width * scaleX;
+        const h = box.height * scaleY;
+        const centerX = x + w / 2;
+        const centerY = y + h / 2;
+
+        const xCoord = Math.round((width / 2) - centerX);
+        const yCoord = Math.round((height / 2) - centerY);
+        const zCoord = Math.round((w / width) * 100);
+
+        xValue.textContent = `${xCoord > 0 ? "+" : ""}${xCoord} px`;
+        yValue.textContent = `${yCoord > 0 ? "+" : ""}${yCoord} px`;
+        zValue.textContent = `${zCoord}%`;
+        statusEl.textContent = w / width > 0.35
+          ? "주의: 얼굴이 화면에 크게 감지되었습니다."
+          : "얼굴 추적 중";
+        statusEl.style.color = w / width > 0.35 ? "#ff7070" : "#4de0a5";
+
+        ctx.strokeStyle = w / width > 0.35 ? "#ff5555" : "#4de0a5";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, y, w, h);
+        ctx.beginPath();
+        ctx.moveTo(centerX - 10, centerY); ctx.lineTo(centerX + 10, centerY);
+        ctx.moveTo(centerX, centerY - 10); ctx.lineTo(centerX, centerY + 10);
+        ctx.stroke();
+
+        // 글자는 반전되지 않도록 별도 좌표 변환을 적용합니다.
+        ctx.save();
+        ctx.translate(width, 0);
+        ctx.scale(-1, 1);
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 14px Arial";
+        ctx.fillText(`X:${xCoord} Y:${yCoord} Z:${zCoord}%`, width - x - w, Math.max(20, y - 8));
+        ctx.restore();
+      } else {
+        xValue.textContent = "—";
+        yValue.textContent = "—";
+        zValue.textContent = "—";
+        statusEl.textContent = "얼굴을 찾는 중...";
+        statusEl.style.color = "#b8c5cc";
+      }
+      ctx.restore();
+      animationId = requestAnimationFrame(drawFrame);
+    }
+
+    async function startCamera() {
+      startBtn.disabled = true;
+      statusEl.textContent = "모델을 불러오는 중...";
+      statusEl.style.color = "#b8c5cc";
+
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("이 환경에서는 카메라를 사용할 수 없습니다. Chrome에서 localhost 또는 HTTPS로 열어 주세요.");
+        }
+
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+
+        try {
+          detector = await FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+              delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            minDetectionConfidence: 0.5
+          });
+        } catch {
+          detector = await FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+              delegate: "CPU"
+            },
+            runningMode: "VIDEO",
+            minDetectionConfidence: 0.5
+          });
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" }, audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        resizeCanvas();
+        running = true;
+        stopBtn.disabled = false;
+        statusEl.textContent = "얼굴을 찾는 중...";
+        animationId = requestAnimationFrame(drawFrame);
+      } catch (error) {
+        console.error(error);
+        statusEl.textContent = `실행 오류: ${error.message || error}`;
+        statusEl.style.color = "#ff7070";
+        startBtn.disabled = false;
+        if (detector) { detector.close(); detector = null; }
+      }
+    }
+
+    function stopCamera() {
+      running = false;
+      if (animationId) cancelAnimationFrame(animationId);
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+      if (detector) { detector.close(); detector = null; }
+      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+      xValue.textContent = "—";
+      yValue.textContent = "—";
+      zValue.textContent = "—";
+      statusEl.textContent = "카메라가 정지되었습니다.";
+      statusEl.style.color = "#b8c5cc";
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+
+    startBtn.addEventListener("click", startCamera);
+    stopBtn.addEventListener("click", stopCamera);
+    resizeCanvas();
+  </script>
+</body>
+</html>
